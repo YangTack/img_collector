@@ -129,7 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
-        if let Some(key) = wait_key(1).ok() {
+        if let Some(key) = wait_key(100).ok() {
             if key == -1 {
                 continue;
             }
@@ -137,10 +137,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(k) => k,
                 None => continue,
             };
-            let dir = PathBuf::from(&args.store_path)
-                .join(key.to_string())
-                .canonicalize()?;
+            let dir = PathBuf::from(&args.store_path).join(key.to_string());
             let _ = create_data_dir(dir.to_str().unwrap());
+            let dir = dir.canonicalize()?;
             let index = indice_map
                 .entry(dir.to_str().unwrap().to_string())
                 .or_insert(0);
