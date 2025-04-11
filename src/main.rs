@@ -3,33 +3,60 @@ use opencv::{
     highgui::{imshow, wait_key},
     imgcodecs::imwrite,
     prelude::*,
-    videoio::{CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH, VideoCapture},
+    videoio::{
+        CAP_PROP_AUTOFOCUS, CAP_PROP_FOCUS, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH,
+        VideoCapture,
+    },
 };
 
-use clap::Parser;
-use std::{boxed::Box, fmt::Debug};
+use clap::{Parser, Subcommand};
+use std::boxed::Box;
+use std::io;
 use std::{collections::HashMap, fs};
 use std::{error::Error, path::PathBuf};
-use std::{
-    io,
-    sync::{Arc, Mutex},
-    thread,
-};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Subcommand)]
+enum VideoFocus {
+    Auto,
+    Focus {
+        #[arg(default_value = "500")]
+        value: f64,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum VideoSource {
+    File {
+        #[arg(long)]
+        path: String,
+    },
+    Capture {
+        #[arg(long, default_value = "0")]
+        device: i32,
+        #[command(subcommand)]
+        focus: VideoFocus,
+    },
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about=None)]
 struct Args {
-    #[arg(short, long)]
-    file: String,
+    #[command(subcommand)]
+    source: VideoSource,
 
-    #[arg(short, long, default_value = "data")]
+    #[arg(long, default_value = "data")]
     store_path: String,
 }
 
 trait VideoSize {
     fn width(&self) -> Result<i32, Box<dyn Error>>;
     fn height(&self) -> Result<i32, Box<dyn Error>>;
+}
+
+trait VideoProp {
+    fn focus(&self) -> Result<f64, Box<dyn Error>>;
+    fn set_focus(&mut self, value: f64) -> Result<(), Box<dyn Error>>;
 }
 
 impl VideoSize for VideoCapture {
@@ -39,6 +66,17 @@ impl VideoSize for VideoCapture {
 
     fn height(&self) -> Result<i32, Box<dyn Error>> {
         Ok(self.get(CAP_PROP_FRAME_HEIGHT)?.round() as i32)
+    }
+}
+
+impl VideoProp for VideoCapture {
+    fn focus(&self) -> Result<f64, Box<dyn Error>> {
+        Ok(self.get(CAP_PROP_FOCUS)?)
+    }
+
+    fn set_focus(&mut self, value: f64) -> Result<(), Box<dyn Error>> {
+        self.set(CAP_PROP_FOCUS, value)?;
+        Ok(())
     }
 }
 
@@ -114,7 +152,20 @@ fn create_data_dir(path: &str) -> io::Result<()> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let mut video = VideoCapture::from_file_def(&args.file)?;
+
+    let mut video = match &&args.source {
+        VideoSource::File { path } => VideoCapture::from_file_def(&path)?,
+        VideoSource::Capture { device, focus } => {
+            let mut cap = VideoCapture::new_def(*device)?;
+            if let VideoFocus::Auto = focus {
+                let _ = cap.set(CAP_PROP_AUTOFOCUS, 1.0);
+            } else if let VideoFocus::Focus { value } = focus {
+                let _ = cap.set(CAP_PROP_AUTOFOCUS, 0.0);
+                let _ = cap.set(CAP_PROP_FOCUS, *value);
+            }
+            cap
+        }
+    };
     let width = video.width()?;
     let height = video.height()?;
     let _ = create_data_dir(&args.store_path);
@@ -137,22 +188,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(k) => k,
                 None => continue,
             };
-            let dir = PathBuf::from(&args.store_path).join(key.to_string());
-            let _ = create_data_dir(dir.to_str().unwrap());
-            let dir = dir.canonicalize()?;
-            let index = indice_map
-                .entry(dir.to_str().unwrap().to_string())
-                .or_insert(0);
-            let path = dir.join(format!("{}.png", index));
-            println!("save img to {:?}", path);
-            *index += 1;
-            let compression_params_clone = compression_params.clone();
-            let _ = imwrite(
-                path.to_str()
-                    .ok_or(AppError::PathError("pathbuf to_str err".into()))?,
-                &store_img,
-                &compression_params_clone,
-            );
+            let mut record = || -> Result<(), AppError> {
+                let dir = PathBuf::from(&args.store_path).join(key.to_string());
+                let _ = create_data_dir(dir.to_str().unwrap());
+                let dir = dir.canonicalize()?;
+                let index = indice_map
+                    .entry(dir.to_str().unwrap().to_string())
+                    .or_insert(0);
+                let path = dir.join(format!("{}.png", index));
+                println!("save img to {:?}", path);
+                *index += 1;
+                let compression_params_clone = compression_params.clone();
+                let _ = imwrite(
+                    path.to_str()
+                        .ok_or(AppError::PathError("pathbuf to_str err".into()))?,
+                    &store_img,
+                    &compression_params_clone,
+                );
+                Ok(())
+            };
+            match &key {
+                '\r' => {
+                    let f = video.focus()?;
+                    println!("Focus: {}", f);
+                }
+                '-' => video.set_focus(video.focus()?.max(1.0) - 1.0)?,
+                '+' => video.set_focus(video.focus()? + 1.0)?,
+                'a'..'z' | '0'..'9' | 'A'..'Z' => record()?,
+                _ => {
+                    continue;
+                }
+            }
         }
     }
     let _ = video.release();
